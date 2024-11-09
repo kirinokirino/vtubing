@@ -1,349 +1,165 @@
-use byteorder::{LittleEndian, ReadBytesExt};
-use glam::{Quat, Vec2, Vec3};
+use ndarray::Array2;
+use ort::{GraphOptimizationLevel, Session};
+extern crate opencv;
+use opencv::{
+    core::{Rect2f, Size2i, Vec3f, VecN, CV_32F, CV_32FC1, CV_32FC3},
+    imgproc,
+    prelude::*,
+    videoio::{
+        VideoCapture, VideoCaptureTrait, CAP_ANY, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH,
+    },
+    Result,
+};
 
-use std::f32::consts::PI;
-use std::io::{Cursor, Write};
-use std::net::UdpSocket;
+pub fn main() {
+    let path = "/home/k/Documents/Rust/k/vtubing/onnx/lib/libonnxruntime.so.1.20.0";
+    ort::init_from(path).commit().unwrap();
 
-const WIDTH: usize = 640;
-const HEIGHT: usize = 480;
+    let model = Session::builder()
+        .unwrap()
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .unwrap()
+        .with_intra_threads(4)
+        .unwrap()
+        .commit_from_file("models/lm_model3_opt.onnx")
+        .unwrap();
 
-const N_POINTS: usize = 68;
-const PACKET_FRAME_SIZE: usize = 8
-    + 4
-    + 2 * 4
-    + 2 * 4
-    + 1
-    + 4
-    + 3 * 4
-    + 3 * 4
-    + 4 * 4
-    + 4 * 68
-    + 4 * 2 * 68
-    + 4 * 3 * 70
-    + 4 * 14;
+    // Open the video capture (0 for default webcam, or a video file path)
+    let mut capture = VideoCapture::new(0, CAP_ANY).unwrap(); // 0 for default webcam
 
-fn main() {
-    let socket = UdpSocket::bind("127.0.0.1:8080").unwrap();
-    println!("Listening on 127.0.0.1:8080");
+    // Set the capture resolution to 640x480
+    capture.set(CAP_PROP_FRAME_WIDTH, 640.0).unwrap();
+    capture.set(CAP_PROP_FRAME_HEIGHT, 480.0).unwrap();
 
-    let mut buf = [0; PACKET_FRAME_SIZE]; // Buffer to hold incoming data
+    if !capture.is_opened().unwrap() {
+        panic!("Error: Couldn't open video capture.");
+    }
 
-    let mut canvas = Canvas::new();
+    let std_224 = [0.01712475, 0.017507, 0.01742919];
+    let mean_224 = [-2.117904, -2.0357141, -1.8044444];
+    let mut frame = Mat::default();
+    let mut resized = Mat::default();
+    let mut rgb = Mat::default();
+    let mut normalized = Mat::default();
     loop {
-        // Receive data
-        let (number_of_bytes, _src_addr) = socket.recv_from(&mut buf).unwrap();
-
-        let packet_data = &buf[..number_of_bytes]; // You should fill this with actual UDP packet data
-        let mut parsed_data = ParsedData::default();
-        parsed_data.read_from_packet(&packet_data);
-        canvas.pen_color = [0, 0, 0, 255];
-        canvas.draw_square(Vec2::new(0., 0.), Vec2::new(WIDTH as f32, HEIGHT as f32));
-        canvas.pen_color = [255, 255, 255, 255];
-        for point in parsed_data.points_3d {
-            let w = 320.0;
-            let h = 240.0;
-            canvas.draw_point(Vec2::new((point.x + 1.0) * w, (point.y + 1.0) * h));
+        // Capture a frame from the video capture
+        capture.read(&mut frame).unwrap();
+        if frame.empty() {
+            eprintln!("Error: No frame captured.");
+            continue;
         }
-        canvas.display();
-    }
-}
 
-#[derive(Debug, Default)]
-struct OpenSeeFeatures {
-    eye_left: f32,
-    eye_right: f32,
-    eyebrow_steepness_left: f32,
-    eyebrow_up_down_left: f32,
-    eyebrow_quirk_left: f32,
-    eyebrow_steepness_right: f32,
-    eyebrow_up_down_right: f32,
-    eyebrow_quirk_right: f32,
-    mouth_corner_up_down_left: f32,
-    mouth_corner_in_out_left: f32,
-    mouth_corner_up_down_right: f32,
-    mouth_corner_in_out_right: f32,
-    mouth_open: f32,
-    mouth_wide: f32,
-}
-
-#[derive(Debug, Default)]
-struct ParsedData {
-    time: f64,
-    id: i32,
-    camera_resolution: Vec2,
-    right_eye_open: f32,
-    left_eye_open: f32,
-    got_3d_points: bool,
-    fit_3d_error: f32,
-    raw_quaternion: Quat,
-    raw_euler: Vec3,
-    rotation: Vec3,
-    translation: Vec3,
-    confidence: Vec<f32>,
-    points: Vec<Vec2>,
-    points_3d: Vec<Vec3>,
-    right_gaze: Quat,
-    left_gaze: Quat,
-    features: OpenSeeFeatures,
-}
-
-impl ParsedData {
-    fn read_from_packet(&mut self, data: &[u8]) {
-        let mut cursor = Cursor::new(data);
-        self.time = cursor.read_f64::<LittleEndian>().unwrap();
-
-        self.id = cursor.read_i32::<LittleEndian>().unwrap();
-
-        self.camera_resolution = self.read_vector2(&mut cursor);
-        self.right_eye_open = self.read_float(&mut cursor);
-        self.left_eye_open = self.read_float(&mut cursor);
-
-        let got_3d = cursor.read_u8().unwrap();
-        self.got_3d_points = got_3d != 0;
-
-        self.fit_3d_error = self.read_float(&mut cursor);
-        self.raw_quaternion = self.read_quaternion(&mut cursor);
-
-        // Convert quaternion as per the logic in C#
-        self.raw_quaternion = Quat::from_xyzw(
-            -self.raw_quaternion.x,
-            self.raw_quaternion.y,
-            -self.raw_quaternion.z,
-            self.raw_quaternion.w,
-        );
-
-        self.raw_euler = self.read_vector3(&mut cursor);
-        self.rotation = self.raw_euler.clone();
-        self.rotation.z = (self.rotation.z - 90.0) % 360.0;
-        self.rotation.x = -(self.rotation.x + 180.0) % 360.0;
-
-        self.translation = Vec3::new(
-            -self.read_float(&mut cursor),
-            self.read_float(&mut cursor),
-            -self.read_float(&mut cursor),
-        );
-
-        self.confidence = (0..N_POINTS)
-            .map(|_| self.read_float(&mut cursor))
-            .collect();
-        self.points = (0..N_POINTS)
-            .map(|_| self.read_vector2(&mut cursor))
-            .collect();
-        self.points_3d = (0..N_POINTS + 2)
-            .map(|_| self.read_vector3(&mut cursor))
-            .collect();
-
-        // Calculate gaze (right_gaze and left_gaze)
-        let (left_gaze, right_gaze) = ParsedData::calculate_gaze(&self.points_3d);
-        self.right_gaze = left_gaze;
-        self.left_gaze = right_gaze;
-
-        // Read features
-        self.features.eye_left = self.read_float(&mut cursor);
-        self.features.eye_right = self.read_float(&mut cursor);
-        self.features.eyebrow_steepness_left = self.read_float(&mut cursor);
-        self.features.eyebrow_up_down_left = self.read_float(&mut cursor);
-        self.features.eyebrow_quirk_left = self.read_float(&mut cursor);
-        self.features.eyebrow_steepness_right = self.read_float(&mut cursor);
-        self.features.eyebrow_up_down_right = self.read_float(&mut cursor);
-        self.features.eyebrow_quirk_right = self.read_float(&mut cursor);
-        self.features.mouth_corner_up_down_left = self.read_float(&mut cursor);
-        self.features.mouth_corner_in_out_left = self.read_float(&mut cursor);
-        self.features.mouth_corner_up_down_right = self.read_float(&mut cursor);
-        self.features.mouth_corner_in_out_right = self.read_float(&mut cursor);
-        self.features.mouth_open = self.read_float(&mut cursor);
-        self.features.mouth_wide = self.read_float(&mut cursor);
-    }
-
-    fn read_vector2(&self, cursor: &mut Cursor<&[u8]>) -> Vec2 {
-        Vec2::new(self.read_float(cursor), self.read_float(cursor))
-    }
-
-    fn read_vector3(&self, cursor: &mut Cursor<&[u8]>) -> Vec3 {
-        Vec3::new(
-            self.read_float(cursor),
-            self.read_float(cursor),
-            self.read_float(cursor),
+        imgproc::resize(
+            &frame,
+            &mut resized,
+            Size2i::new(224, 224),
+            0.0,
+            0.0,
+            imgproc::INTER_LINEAR,
         )
-    }
+        .unwrap();
 
-    fn read_float(&self, cursor: &mut Cursor<&[u8]>) -> f32 {
-        cursor.read_f32::<LittleEndian>().unwrap()
-    }
+        // Step 2: Convert from BGR to RGB by reversing channels
+        imgproc::cvt_color(&resized, &mut rgb, imgproc::COLOR_BGR2RGB, 0).unwrap();
 
-    fn read_quaternion(&self, cursor: &mut Cursor<&[u8]>) -> Quat {
-        Quat::from_xyzw(
-            self.read_float(cursor),
-            self.read_float(cursor),
-            self.read_float(cursor),
-            self.read_float(cursor),
-        )
-    }
+        // Step 3: Normalize the image by applying the mean and std deviation
+        // We need to cast the Mat to a type that can hold the resulting floating point values (CV_32F)
+        rgb.convert_to(&mut normalized, CV_32FC1, 1.0, 0.0).unwrap();
 
-    fn calculate_gaze(points_3d: &[Vec3]) -> (Quat, Quat) {
-        // Right gaze calculation (points 66 and 68)
-        let right_direction = swap_x(points_3d[66]) - swap_x(points_3d[68]);
-        let right_gaze = Quat::from_rotation_arc(Vec3::Z, right_direction.normalize()) // LookRotation equivalent
-            * Quat::from_axis_angle(Vec3::X, std::f32::consts::PI)   // 180 degrees around X axis
-            * Quat::from_axis_angle(Vec3::Y, std::f32::consts::PI); // 180 degrees around Y axis
-
-        // Left gaze calculation (points 67 and 69)
-        let left_direction = swap_x(points_3d[67]) - swap_x(points_3d[69]);
-        let left_gaze = Quat::from_rotation_arc(Vec3::Z, left_direction.normalize()) // LookRotation equivalent
-            * Quat::from_axis_angle(Vec3::X, std::f32::consts::PI)   // 180 degrees around X axis
-            * Quat::from_axis_angle(Vec3::Y, std::f32::consts::PI); // 180 degrees around Y axis
-
-        (right_gaze, left_gaze)
-    }
-}
-
-fn swap_x(v: Vec3) -> Vec3 {
-    Vec3::new(-v.x, v.y, v.z)
-}
-
-struct Canvas {
-    pub buffer: Vec<u8>,
-    pub pen_color: [u8; 4],
-}
-
-impl Canvas {
-    pub fn new() -> Self {
-        let mut buffer = vec![255u8; WIDTH * HEIGHT * 4];
-        let pen_color = [255, 255, 255, 255];
-        Self { buffer, pen_color }
-    }
-
-    pub fn transparent(&mut self) {
-        self.pen_color = [0, 0, 0, 0];
-    }
-
-    pub fn display(&self) {
-        let file = std::fs::File::options()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open("/tmp/imagesink")
-            .unwrap();
-        let size = 640 * 480 * 4;
-        file.set_len(size.try_into().unwrap()).unwrap();
-        let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file).unwrap() };
-        if let Some(err) = mmap.lock().err() {
-            panic!("{err}");
-        }
-        let _ = (&mut mmap[..]).write_all(&self.buffer.as_slice());
-    }
-
-    fn draw_curve(&mut self, start: Vec2, control: Vec2, end: Vec2) {
-        let points = start.distance(control) + control.distance(end) + end.distance(start);
-        for i in 1..points as usize {
-            let proportion = i as f32 / points;
-            let path1 = control - start;
-            let point1 = start + path1 * proportion;
-            let path2 = end - control;
-            let point2 = control + path2 * proportion;
-            let path3 = point2 - point1;
-            let point3 = point1 + path3 * proportion;
-            self.draw_point(point3);
-        }
-    }
-
-    fn draw_line(&mut self, from: Vec2, to: Vec2) {
-        let delta = to - from;
-        let normalized = delta.normalize();
-        for step in 0..delta.length() as usize {
-            let magnitude = step as f32;
-            let x = from.x + normalized.x * magnitude;
-            let y = from.y + normalized.y * magnitude;
-            self.draw_point(Vec2::new(x, y));
-        }
-    }
-
-    fn draw_circle(&mut self, pos: Vec2, radius: f32) {
-        let left_x = (pos.x - radius) as usize;
-        let right_x = (pos.x + radius) as usize;
-        let top_y = (pos.y - radius) as usize;
-        let bottom_y = (pos.y + radius) as usize;
-        for offset_x in left_x..=right_x {
-            for offset_y in top_y..=bottom_y {
-                if ((offset_x as f32 - pos.x as f32).powi(2)
-                    + (offset_y as f32 - pos.y as f32).powi(2))
-                .sqrt()
-                    < radius
-                {
-                    self.draw_point(Vec2::new(offset_x as f32, offset_y as f32));
+        // Normalize using (pixel - mean) / std
+        for row in 0..normalized.rows() {
+            for col in 0..normalized.cols() {
+                let pixel: &mut VecN<f32, 3> = normalized.at_2d_mut(row, col).unwrap();
+                for channel in 0..3usize {
+                    pixel[channel] = (pixel[channel] - mean_224[channel]) / std_224[channel];
                 }
             }
         }
+
+        // Convert `Mat` to `ndarray::Array4`
+        let array = mat_to_ndarray(&normalized);
+        let array = array.unwrap();
+
+        // Step 1: Expand dimensions (add a batch dimension)
+        let expanded = array.insert_axis(ndarray::Axis(0)); // Adds a batch dimension at axis 0
+
+        // Step 2: Transpose to change shape from (batch_size, height, width, channels)
+        // to (batch_size, channels, height, width)
+        let transposed = expanded.permuted_axes([0, 1, 2, 3]);
+
+        let inputs = transposed;
+        let outputs = model.run(ort::inputs!("input" => inputs).unwrap()).unwrap();
+        let predictions = outputs["output0"].try_extract_tensor::<f32>().unwrap();
+        //ort::inputs![]
+        // let outputs = model.run(ort::inputs!["image" => image]?)?;
+        // let predictions = outputs["output0"].try_extract_tensor::<f32>()?;
+
+        println!("Frame captured: {:?}", frame);
     }
 
-    fn draw_arc(&mut self, center: Vec2, radius: f32, angle_spread: f32, direction: f32) {
-        let steps = (2.0 * radius * PI) as usize + 1;
-        let start = direction - angle_spread / 2.0;
-        let end = direction + angle_spread / 2.0;
-        for step in 0..steps {
-            let arc_point =
-                Vec2::from_angle(map(step as f32, 0.0, steps as f32, start, end)) * radius + center;
-            self.draw_point(arc_point);
+    // Close the video capture and window
+    capture.release().unwrap();
+}
+
+// Convert a Mat (OpenCV) to ndarray (Rust)
+fn mat_to_ndarray(mat: &Mat) -> Result<ndarray::Array3<f32>> {
+    assert!(mat.typ() == CV_32FC3);
+    // Get the number of rows, columns, and channels
+    let rows = mat.rows();
+    let cols = mat.cols();
+    let channels = mat.channels();
+
+    let mat_data = mat.data_typed::<Vec3f>().unwrap();
+    let flattened_data: Vec<f32> = mat_data
+        .iter()
+        .flat_map(|vec| vec.0) // `vec.0` accesses the internal `[f32; 3]` in Vec3f
+        .collect();
+
+    // Create the ndarray Array4 (batch, channels, height, width)
+    let array = ndarray::Array::from_shape_vec(
+        (channels as usize, rows as usize, cols as usize),
+        flattened_data,
+    );
+
+    match array {
+        Ok(array) => Ok(array),
+        Err(err) => {
+            panic!("{err}");
+            // Err(opencv::Error {
+            // code: opencv::core::StsError,
+            // message: format!("ShapeError: {err}"),
         }
-    }
-
-    fn draw_square(&mut self, top_left: Vec2, bottom_right: Vec2) {
-        for offset_x in top_left.x as usize..=bottom_right.x as usize {
-            for offset_y in top_left.y as usize..=bottom_right.y as usize {
-                self.draw_point(Vec2::new(offset_x as f32, offset_y as f32));
-            }
-        }
-    }
-
-    fn draw_point(&mut self, pos: Vec2) {
-        if pos.x >= 640.0 || pos.x < 0.0 || pos.y >= 480.0 || pos.y < 0.0 {
-            return;
-        }
-        let buffer_idx = self.idx(pos.x as usize, pos.y as usize);
-        // if (buffer_idx + 3) > self.buffer.len() {
-        //     // TODO err?
-        //     return;
-        // }
-        self.point_blend(buffer_idx);
-    }
-
-    fn point_blend(&mut self, buffer_idx: usize) {
-        let [r, g, b, a] = self.pen_color;
-
-        if a == 0 {
-            return;
-        } else if a == 255 {
-            self.point_replace(buffer_idx);
-            return;
-        }
-
-        let mix = a as f32 / 255.0;
-        let [dst_r, dst_g, dst_b, dst_a] = [
-            self.buffer[buffer_idx] as f32,
-            self.buffer[buffer_idx + 1] as f32,
-            self.buffer[buffer_idx + 2] as f32,
-            self.buffer[buffer_idx + 3] as f32,
-        ];
-
-        self.buffer[buffer_idx] = ((r as f32 * mix) + (dst_r * (1.0 - mix))) as u8;
-        self.buffer[buffer_idx + 1] = ((g as f32 * mix) + (dst_g * (1.0 - mix))) as u8;
-        self.buffer[buffer_idx + 2] = ((b as f32 * mix) + (dst_b * (1.0 - mix))) as u8;
-        self.buffer[buffer_idx + 3] = ((a as f32 * mix) + (dst_a * (1.0 - mix))) as u8;
-    }
-
-    fn point_replace(&mut self, buffer_idx: usize) {
-        self.buffer[buffer_idx] = self.pen_color[0];
-        self.buffer[buffer_idx + 1] = self.pen_color[1];
-        self.buffer[buffer_idx + 2] = self.pen_color[2];
-        self.buffer[buffer_idx + 3] = self.pen_color[3];
-    }
-
-    fn idx(&self, x: usize, y: usize) -> usize {
-        (x + y * WIDTH) * 4
     }
 }
 
-pub fn map(value: f32, start1: f32, stop1: f32, start2: f32, stop2: f32) -> f32 {
-    (value - start1) / (stop1 - start1) * (stop2 - start2) + start2
+/// Function to convert an OpenCV `Mat` to an `ndarray::Array2`
+fn mat_to_array2(mat: &Mat) -> Result<Array2<f32>> {
+    // Ensure the Mat is of the expected type (CV_32F)
+    if mat.typ() != CV_32F {
+        return Err(opencv::Error::new(
+            opencv::core::StsBadArg,
+            format!(
+                "Mat type must be CV_32F for conversion to Array2, found: {}",
+                mat.typ()
+            ),
+        ));
+    }
+
+    // Get the number of rows and columns from the Mat
+    let rows = mat.rows();
+    let cols = mat.cols();
+
+    // Get a flat slice of the Mat's data
+    let mat_data = mat.data_typed::<f32>().unwrap();
+
+    // Convert the flat data into an ndarray::Array2
+    let array = Array2::<f32>::from_shape_vec((rows as usize, cols as usize), mat_data.to_vec());
+
+    match array {
+        Ok(array) => Ok(array),
+        Err(err) => Err(opencv::Error {
+            code: opencv::core::StsError,
+            message: format!("ShapeError: {err}"),
+        }),
+    }
 }
