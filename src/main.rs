@@ -1,8 +1,9 @@
-use ndarray::Array2;
+use itertools::Itertools;
+use ndarray::s;
 use ort::{GraphOptimizationLevel, Session};
 extern crate opencv;
 use opencv::{
-    core::{Rect2f, Size2i, Vec3f, VecN, CV_32F, CV_32FC1, CV_32FC3},
+    core::{Size2i, Vec3f, VecN, CV_32FC1, CV_32FC3},
     imgproc,
     prelude::*,
     videoio::{
@@ -15,22 +16,22 @@ pub fn main() {
     let path = "/home/k/Documents/Rust/k/vtubing/onnx/lib/libonnxruntime.so.1.20.0";
     ort::init_from(path).commit().unwrap();
 
+    let num_threads = 4;
+
     let detection = Session::builder()
         .unwrap()
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .unwrap()
-        .with_intra_threads(4)
+        .with_intra_threads(num_threads)
         .unwrap()
-        .commit_from_file("models/lm_model3_opt.onnx")
+        .commit_from_file("models/mnv3_detection_opt.onnx")
         .unwrap();
 
     // Open the video capture (0 for default webcam, or a video file path)
     let mut capture = VideoCapture::new(0, CAP_ANY).unwrap(); // 0 for default webcam
-
-    // Set the capture resolution to 640x480
+                                                              // Set the capture resolution to 640x480
     capture.set(CAP_PROP_FRAME_WIDTH, 640.0).unwrap();
     capture.set(CAP_PROP_FRAME_HEIGHT, 480.0).unwrap();
-
     if !capture.is_opened().unwrap() {
         panic!("Error: Couldn't open video capture.");
     }
@@ -47,12 +48,50 @@ pub fn main() {
         }
 
         let input = preprocessor.preprocess();
-        
+
+        // println!("{:?}", input.shape());
+        // println!("{:?}", input.slice(s![0, .., .., ..]));
+
         let output = detection
             .run(ort::inputs!("input" => input).unwrap())
             .unwrap();
-        let predictions = output["output"].try_extract_tensor::<f32>().unwrap();
-        println!("{}", predictions.len());
+
+        let mut predictions = output["output"]
+            .try_extract_tensor::<f32>()
+            .unwrap()
+            .to_owned();
+        let maxpool = output["maxpool"].try_extract_tensor::<f32>().unwrap();
+
+        // outputs[0, 0, outputs[0, 0] != maxpool[0, 0]] = 0
+
+        // Get the raw data as slices
+        let mut pred_data = predictions.view_mut();
+        let maxpool_data = maxpool.view();
+
+        // Zero out predictions where they don't match maxpool
+        for (pred, &max) in pred_data.iter_mut().zip(maxpool_data.iter()) {
+            if *pred != max {
+                *pred = 0.0;
+            }
+        }
+
+        // detections = np.flip(np.argsort(outputs[0,0].flatten()))
+        let sorted_indices: Vec<_> = pred_data
+            .iter()
+            .enumerate().sorted_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap())
+            .collect();
+
+        let detections: Vec<usize> = sorted_indices.iter().map(|(i, _)| *i).collect();
+
+        // for (index, &element) in detections.iter().enumerate() {
+        //     // Compare element with its index
+        //     if element != index {
+        //         println!("Element {} is not equal to its index {}", element, index);
+        //     }
+        // }
+        // println!("{}, {}", detections[0], detections[1]);
+
+        //println!("{:?}", sorted_indices);
         //println!("Frame captured: {:?}", frame);
     }
 
@@ -141,8 +180,10 @@ impl ImagePreprocessor {
             for col in 0..self.normalized.cols() {
                 let pixel: &mut VecN<f32, 3> = self.normalized.at_2d_mut(row, col).unwrap();
                 for channel in 0..3usize {
-                    pixel[channel] =
-                        (pixel[channel] - self.mean_224[channel]) / self.std_224[channel];
+                    // pixel[channel] =
+                    //     (pixel[channel] - self.mean_224[channel]) / self.std_224[channel];
+
+                    pixel[channel] = pixel[channel] * self.std_224[channel] + self.mean_224[channel];
                 }
             }
         }

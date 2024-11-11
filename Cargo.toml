@@ -7,4 +7,5 @@ edition = "2021"
 ort = { version = "2.0.0-rc.8", git = "https://github.com/pykeio/ort", default-features = false, features=["load-dynamic", "ndarray"] }
 opencv = { version = "0.93.3" } #, default-features = false, features = ["videoio", "rgb"] }
 fastrand = "2.2.0"
-ndarray = "0.16.1"
+ndarray = { version = "0.16.1", features = ["approx"] }
+itertools = "0.13.0"
