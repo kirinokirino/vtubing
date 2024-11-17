@@ -1,5 +1,5 @@
 use glam::Vec2;
-use ndarray::{s, Array1, Array2, Axis};
+use ndarray::{s, Array1, Array2, ArrayView1, Axis};
 
 use std::collections::HashMap;
 use std::ops::{DivAssign, SubAssign};
@@ -197,4 +197,176 @@ impl FaceInfo {
 
         pts_3d
     }
+
+    pub fn adjust_3d(&mut self) {
+        // Early return conditions
+        if self.conf.unwrap_or(0.0) < 0.4 || self.pnp_error > 300.0 {
+            return;
+        }
+
+        let max_runs = 1;
+        let mut eligible: Vec<usize> = (0..66).filter(|&x| x != 30).collect();
+        let mut changed_any = false;
+        let mut update_type: i32 = -1;
+        let mut d_o: Array1<f32> = Array1::ones(66);
+        let mut d_c: Array1<f32> = Array1::ones(66);
+
+        for runs in 0..max_runs {
+            // Create random adjustments (1.0 +/- 0.01)
+            let mut r = Array2::zeros((66, 3));
+            for i in 0..66 {
+                for j in 0..3 {
+                    r[[i, j]] = 1.0 + (fastrand::f32() * 0.02 - 0.01);
+                }
+            }
+            r.slice_mut(s![30, ..]).fill(1.0);
+
+            let euler = self.euler.as_ref().unwrap();
+            if euler[0] > -165.0 && euler[0] < 145.0 {
+                continue;
+            } else if euler[1] > -10.0 && euler[1] < 20.0 {
+                r.slice_mut(s![.., 2]).fill(1.0);
+                update_type = 0;
+            } else {
+                r.slice_mut(s![.., 0..2]).fill(1.0);
+                if euler[2] > 120.0 || euler[2] < 60.0 {
+                    continue;
+                }
+                
+                // Update eligible points based on euler[1]
+                if euler[1] < -10.0 {
+                    update_type = 1;
+                    let fixed_indices = vec![0, 1, 2, 3, 4, 5, 6, 7, 17, 18, 19, 20, 21, 31, 32, 36, 
+                                          37, 38, 39, 40, 41, 48, 49, 56, 57, 58, 59, 65];
+                    for &idx in &fixed_indices {
+                        r[[idx, 2]] = 1.0;
+                    }
+                    eligible = vec![8, 9, 10, 11, 12, 13, 14, 15, 16, 22, 23, 24, 25, 26, 27, 28, 29, 
+                                  33, 34, 35, 42, 43, 44, 45, 46, 47, 50, 51, 52, 53, 54, 55, 60, 61, 
+                                  62, 63, 64];
+                } else {
+                    update_type = 1;
+                    let fixed_indices = vec![9, 10, 11, 12, 13, 14, 15, 16, 22, 23, 24, 25, 26, 34, 
+                                          35, 42, 43, 44, 45, 46, 47, 51, 52, 53, 54, 61, 62, 63];
+                    for &idx in &fixed_indices {
+                        r[[idx, 2]] = 1.0;
+                    }
+                    eligible = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 17, 18, 19, 20, 21, 27, 28, 29, 31, 
+                                  32, 33, 36, 37, 38, 39, 40, 41, 48, 49, 50, 55, 56, 57, 58, 59, 60, 
+                                  64, 65];
+                }
+            }
+
+            if self.limit_3d_adjustment {
+                eligible = eligible
+                    .into_iter()
+                    .filter(|&i| {
+                        self.update_counts[[i, update_type as usize]] < 
+                        self.update_counts[[i, (update_type - 1).abs() as usize]] + self.update_count_delta
+                    })
+                    .collect();
+                
+                if eligible.is_empty() {
+                    break;
+                }
+            }
+
+            if runs == 0 {
+                let mut updated = self.face_3d.slice(s![0..66, ..]).to_owned();
+                let mut o_projected = Array2::ones((66, 2));
+                
+                // TODO: Implement cv2.projectPoints equivalent
+                // o_projected.slice_mut(s![eligible, ..]) = project_points(
+                //     &self.face_3d.select(Axis(0), &eligible),
+                //     &self.rotation.unwrap(),
+                //     &self.translation.unwrap(),
+                //     camera,
+                //     dist_coeffs
+                // );
+
+                let c = &updated * &r;
+                let mut c_projected = Array2::zeros((66, 2));
+                
+                // TODO: Implement cv2.projectPoints equivalent for c_projected
+                
+                let mut changed = false;
+
+                // Calculate distances
+                for &idx in &eligible {
+                    let o_diff = &o_projected.slice(s![idx, ..]).to_owned() - &self.lms.as_ref().unwrap().slice(s![idx, 0..2]).to_owned();
+                    let c_diff = &c_projected.slice(s![idx, ..]).to_owned() - &self.lms.as_ref().unwrap().slice(s![idx, 0..2]).to_owned();
+                    d_o[idx] = norm2(&o_diff.view());
+                    d_c[idx] = norm2(&c_diff.view());
+                }
+
+                // Find indices where d_c < d_o
+                let indices: Vec<usize> = (0..66)
+                    .filter(|&i| d_c[i] < d_o[i])
+                    .collect();
+
+                if !indices.is_empty() {
+                    let indices = if self.limit_3d_adjustment {
+                        indices.into_iter()
+                            .filter(|&i| eligible.contains(&i))
+                            .collect::<Vec<_>>()
+                    } else {
+                        indices
+                    };
+
+                    if !indices.is_empty() {
+                        for &idx in &indices {
+                            self.update_counts[[idx, update_type as usize]] += 1.0;
+                            updated.slice_mut(s![idx, ..]).assign(&c.slice(s![idx, ..]));
+                            o_projected.slice_mut(s![idx, ..]).assign(&c_projected.slice(s![idx, ..]));
+                        }
+                        changed = true;
+                    }
+                }
+
+                changed_any = changed_any || changed;
+
+                if !changed {
+                    break;
+                }
+
+                if changed_any {
+                    // Update weighted by point confidence
+                    let mut weights = Array2::zeros((66, 3));
+                    weights.assign(&self.lms.as_ref().unwrap().slice(s![0..66, 2..3]));
+                    weights.mapv_inplace(|x| if x > 0.7 { 1.0 } else { x });
+                    weights.mapv_inplace(|x| 1.0 - x);
+
+                    let update_indices: Vec<usize> = if self.limit_3d_adjustment {
+                        (0..66)
+                            .filter(|&i| self.update_counts[[i, update_type as usize]] <= self.update_count_max)
+                            .collect()
+                    } else {
+                        (0..66).collect()
+                    };
+
+                    for &idx in &update_indices {
+                        let copy = self.face_3d.clone();
+                        self.face_3d.slice_mut(s![idx, ..]).assign(
+                            &(copy.slice(s![idx, ..]).to_owned() * weights.slice(s![idx, ..]).to_owned() 
+                            + updated.slice(s![idx, ..]).to_owned() * (1.0 - weights.slice(s![idx, ..]).to_owned()))
+                        );
+                    }
+                    self.update_contour();
+                }
+            }
+        }
+
+        let normalized_pts_3d = self.normalize_pts3d(self.pts_3d.as_ref().unwrap().clone());
+        if let Some(pts_3d) = self.pts_3d.as_mut() {
+            *pts_3d = normalized_pts_3d;
+        }
+
+        // TODO: Implement feature extraction and eye blink calculation
+        // This would depend on your FeatureExtractor implementation
+    }
+}
+
+// Helper function to calculate L2 norm of a 1D array
+fn norm2(arr: &ArrayView1<f32>) -> f32 {
+    arr.iter().map(|&x| x * x).sum::<f32>().sqrt()
 }

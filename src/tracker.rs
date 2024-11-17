@@ -1,13 +1,28 @@
 use glam::Vec2;
-use ndarray::{array, s, Array1, Array2, Array3, Array4, Axis, Ix3, Ix4};
+use ndarray::{array, s, stack, Array1, Array2, Array3, Array4, Axis, Ix3, Ix4};
 use ndarray_linalg::solve::Inverse;
 use opencv::{
-    core::{Mat, Point2f, Rect, Scalar, Size, Vec3b, BORDER_CONSTANT}, imgproc::{get_rotation_matrix_2d, warp_affine, INTER_LINEAR}, prelude::*
+    calib3d::{rodrigues, solve_pnp, SOLVEPNP_ITERATIVE},
+    core::{no_array, Mat, Point2f, Point3f, Rect, Scalar, Size, Vec3b, BORDER_CONSTANT, CV_32F},
+    imgproc::{get_rotation_matrix_2d, warp_affine, INTER_LINEAR},
+    prelude::*,
 };
 use ort::{Environment, GraphOptimizationLevel, Session, SessionBuilder};
+
+use std::ops::Sub;
 use std::{f32::consts::PI, path::Path};
 
-use crate::{face_info::FaceInfo, math::{compensate_rotation, rotate}};
+use crate::{
+    face_info::FaceInfo,
+    math::{compensate_rotation, matrix_to_quaternion, rotate},
+};
+
+fn mat_to_array2(mat: &Mat) -> Result<Array2<f32>, Box<dyn std::error::Error>> {
+    let rows = mat.rows();
+    let cols = mat.cols();
+    let data: Vec<f32> = mat.data_typed()?.to_vec();
+    Array2::from_shape_vec((rows as usize, cols as usize), data).map_err(|e| e.into())
+}
 
 pub struct Tracker {
     // Session and model related
@@ -158,7 +173,8 @@ impl Tracker {
         // Get eye state
         let eye_state = match self.get_eye_state(frame, &landmarks) {
             Ok(state) => state,
-            Err(_) => Array2::from_shape_vec((2, 4), vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]).unwrap(),
+            Err(_) => Array2::from_shape_vec((2, 4), vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+                .unwrap(),
         };
 
         // Update face info fields
@@ -170,8 +186,8 @@ impl Tracker {
         face_info.frame_count = self.frame_count;
 
         // Estimate depth and adjust 3D model
-        self.estimate_depth(&mut face_info)?;
-        face_info.adjust_3d()?;
+        self.estimate_depth(&mut face_info).unwrap();
+        face_info.adjust_3d();
 
         // Update bounding box
         if let Some(lms) = &face_info.lms {
@@ -335,7 +351,12 @@ impl Tracker {
                 opencv::core::CV_32FC3,
                 Scalar::all(0.0),
             )?;
-            resized.convert_to(&mut float_img, opencv::core::CV_32F, STD_224.into(), MEAN_224.into())?;
+            resized.convert_to(
+                &mut float_img,
+                opencv::core::CV_32F,
+                STD_224.into(),
+                MEAN_224.into(),
+            )?;
 
             // Convert to ONNX input format
             let mut input_tensor =
@@ -350,7 +371,9 @@ impl Tracker {
             }
 
             // Run inference
-            let output = self.session.run(ort::inputs!("input" => input_tensor).unwrap())?;
+            let output = self
+                .session
+                .run(ort::inputs!("input" => input_tensor).unwrap())?;
             let output_tensor = output["output"].try_extract_tensor::<f32>()?;
 
             // Process landmarks
@@ -469,15 +492,25 @@ impl Tracker {
                     right_eye.5,
                 )
             } else {
-                (left_eye.1, left_eye.2, left_eye.3.clone(), left_eye.4, left_eye.5)
+                (
+                    left_eye.1,
+                    left_eye.2,
+                    left_eye.3.clone(),
+                    left_eye.4,
+                    left_eye.5,
+                )
             };
 
             let mut transformed_x = e_x + scale[0] * eye_x;
             let mut transformed_y = e_y + scale[1] * eye_y;
 
             // Rotate point back
-            let (rotated_x, rotated_y) =
-                rotate(Vec2::new(reference.x, reference.y), Vec2::new(transformed_x, transformed_y), -angle).into();
+            let (rotated_x, rotated_y) = rotate(
+                Vec2::new(reference.x, reference.y),
+                Vec2::new(transformed_x, transformed_y),
+                -angle,
+            )
+            .into();
 
             transformed_x = rotated_x + offset[0];
             transformed_y = rotated_y + offset[1];
@@ -543,10 +576,8 @@ impl Tracker {
         full_frame: &Mat,
         corners: &Array2<f32>,
         flip: bool,
-    ) -> Result<
-        (Option<Array4<f32>>, f32, f32, Array1<f32>, Point2f, f32),
-        Box<dyn std::error::Error>,
-    > {
+    ) -> Result<(Option<Array4<f32>>, f32, f32, Vec<f32>, Point2f, f32), Box<dyn std::error::Error>>
+    {
         const STD_32: f32 = 0.456;
         const MEAN_32: f32 = 0.485;
 
@@ -559,19 +590,19 @@ impl Tracker {
         let center = Point2f::new((c1.x + c2_comp.x) / 2.0, (c1.y + c2_comp.y) / 2.0);
 
         let radius = ((c1.x - c2_comp.x).powi(2) + (c1.y - c2_comp.y).powi(2)).sqrt() / 2.0;
-        let radius = Array1::from_vec(vec![radius * 1.4, radius * 1.2]);
+        let scale = vec![radius * 1.4 / 32.0, radius * 1.2 / 32.0];
 
         let h = frame.rows() as f32;
         let w = frame.cols() as f32;
 
         // Calculate crop coordinates
-        let x1 = (center.x - radius[0]).max(0.0).min(w);
-        let y1 = (center.y - radius[1]).max(0.0).min(h);
-        let x2 = (center.x + radius[0]).max(0.0).min(w);
-        let y2 = (center.y + radius[1]).max(0.0).min(h);
+        let x1 = (center.x - scale[0]).max(0.0).min(w);
+        let y1 = (center.y - scale[1]).max(0.0).min(h);
+        let x2 = (center.x + scale[0]).max(0.0).min(w);
+        let y2 = (center.y + scale[1]).max(0.0).min(h);
 
         if (x2 - x1) < 1.0 || (y2 - y1) < 1.0 {
-            return Ok((None, 0.0, 0.0, Array1::zeros(2), Point2f::new(c1.x, c1.y), angle));
+            return Ok((None, 0.0, 0.0, scale, Point2f::new(c1.x, c1.y), angle));
         }
 
         // Rotate and crop image
@@ -590,10 +621,11 @@ impl Tracker {
         let mut eye_region = Mat::roi(
             &rotated,
             Rect::new(x1 as i32, y1 as i32, (x2 - x1) as i32, (y2 - y1) as i32),
-        )?.try_clone()?;
+        )?
+        .try_clone()?;
 
         if flip {
-            opencv::core::flip(&eye_region, &mut eye_region, 1)?;
+            opencv::core::flip(&eye_region.clone(), &mut eye_region, 1)?;
         }
 
         // Resize to 32x32
@@ -618,7 +650,246 @@ impl Tracker {
             }
         }
 
-        Ok((Some(tensor), x1, y1, offset, Point2f::new(c1.x, c1.y), angle))
+        Ok((Some(tensor), x1, y1, scale, Point2f::new(c1.x, c1.y), angle))
+    }
+
+    fn estimate_depth(&self, face_info: &mut FaceInfo) -> Result<(), Box<dyn std::error::Error>> {
+        // Create landmarks array with eye state
+        let mut lms = Array2::zeros((70, 3));
+        lms.slice_mut(s![..66, ..])
+            .assign(&face_info.lms.as_ref().unwrap());
+        if let Some(eye_state) = &face_info.eye_state {
+            for i in 0..2 {
+                lms[[66 + i, 0]] = eye_state[[i, 2]]; // x
+                lms[[66 + i, 1]] = eye_state[[i, 1]]; // y
+                lms[[66 + i, 2]] = eye_state[[i, 3]]; // confidence
+            }
+        }
+
+        let object_pts: opencv::core::Vector<Point3f> = face_info
+            .contour
+            .rows()
+            .into_iter()
+            .map(|i| Point3f::new(i[0], i[1], i[2]))
+            .collect();
+
+        let image_pts: opencv::core::Vector<Point2f> = face_info
+            .contour_pts
+            .iter()
+            .map(|&idx| Point2f::new(lms[[idx, 0]], lms[[idx, 1]]))
+            .collect();
+
+        // Convert camera matrix and distortion coefficients
+        let camera_mat = Mat::from_slice(&self.camera.as_slice().unwrap())?;
+        let dist_coeffs: opencv::core::Vector<f32> = opencv::core::Vector::from_iter(self.dist_coeffs.iter().cloned());
+
+        // Solve PnP
+        let (success, rotation, translation) = if let Some(rot) = &face_info.rotation {
+            let mut rvec = Mat::from_slice(&rot.to_vec())?.try_clone()?;
+            let mut tvec =
+                Mat::from_slice(&face_info.translation.as_ref().unwrap().to_vec())?.try_clone()?;
+
+            let success = solve_pnp(
+                &object_pts,
+                &image_pts,
+                &camera_mat,
+                &dist_coeffs,
+                &mut rvec,
+                &mut tvec,
+                true,
+                SOLVEPNP_ITERATIVE,
+            )?;
+
+            (success, rvec, tvec)
+        } else {
+            let mut rvec = Mat::zeros(3, 1, CV_32F)?.to_mat()?;
+            let mut tvec = Mat::zeros(3, 1, CV_32F)?.to_mat()?;
+
+            let success = solve_pnp(
+                &object_pts,
+                &image_pts,
+                &camera_mat,
+                &dist_coeffs,
+                &mut rvec,
+                &mut tvec,
+                true,
+                SOLVEPNP_ITERATIVE,
+            )?;
+
+            (success, rvec, tvec)
+        };
+
+        let mut pts_3d = Array2::zeros((70, 3));
+
+        if !success {
+            face_info.rotation = Some(array![0.0, 0.0, 0.0]);
+            face_info.translation = array![0.0, 0.0, 0.0].into();
+            face_info.success = Some(false);
+            face_info.quaternion = Some(array![0.0, 0.0, 0.0, 0.0]);
+            face_info.euler = Some(array![0.0, 0.0, 0.0]);
+            face_info.pnp_error = 99999.0;
+            face_info.pts_3d = Some(pts_3d);
+            face_info.lms = Some(lms);
+            return Ok(());
+        }
+
+        // Convert rotation vector to matrix and get inverse
+        let mut rmat = Mat::default();
+        rodrigues(&rotation, &mut rmat, &mut no_array())?;
+        let rmat_array = mat_to_array2(&rmat)?;
+        let inverse_rotation = rmat_array.inv()?;
+
+        // Calculate reference points
+        let t_reference = face_info.face_3d.dot(&rmat_array.t());
+        let t_reference = &t_reference + &face_info.translation.as_ref().unwrap().view();
+        let t_reference = t_reference.dot(&self.camera.t());
+
+        let mut t_depth = t_reference.slice(s![.., 2]).to_owned();
+        t_depth.mapv_inplace(|x| if x == 0.0 { 0.000001 } else { x });
+
+        let t_depth_e = t_depth.insert_axis(Axis(1));
+        let t_reference = &t_reference / &t_depth_e;
+
+        // Calculate 3D points for first 66 landmarks
+        let lms_stack = stack![
+            Axis(1),
+            lms.slice(s![..66, 0]),
+            lms.slice(s![..66, 1]),
+            Array1::ones(66)
+        ];
+        pts_3d.slice_mut(s![..66, ..]).assign(
+            &((&lms_stack * &t_depth_e.slice(s![..66, ..]))
+                .into_shape((66, 3))?
+                .dot(&self.inverse_camera.t())
+                .sub(&face_info.translation.as_ref().unwrap().view())
+                .dot(&inverse_rotation.t())),
+        );
+
+        // Calculate initial PnP error
+        let mut pnp_error = (&lms.slice(s![..17, ..2]) - &t_reference.slice(s![..17, ..2]))
+            .mapv(|x| x.powi(2))
+            .sum();
+        pnp_error += (&lms.slice(s![30..31, ..2]) - &t_reference.slice(s![30..31, ..2]))
+            .mapv(|x| x.powi(2))
+            .sum();
+
+        if pnp_error.is_nan() {
+            pnp_error = 9999999.0;
+        }
+
+        // Process remaining points (eyes)
+        for i in 0..4 {
+            if i == 2 {
+                // Right eyeball
+                let eye_center = (&pts_3d.row(36) + &pts_3d.row(39)) / 2.0;
+                let d_corner = ((&pts_3d.row(36) - &pts_3d.row(39)).mapv(|x| x.powi(2)))
+                    .sum()
+                    .sqrt();
+                let depth = 0.385 * d_corner;
+                pts_3d.row_mut(68).assign(&array![
+                    eye_center[0],
+                    eye_center[1],
+                    eye_center[2] - depth
+                ]);
+                continue;
+            }
+            if i == 3 {
+                // Left eyeball
+                let eye_center = (&pts_3d.row(42) + &pts_3d.row(45)) / 2.0;
+                let d_corner = ((&pts_3d.row(42) - &pts_3d.row(45)).mapv(|x| x.powi(2)))
+                    .sum()
+                    .sqrt();
+                let depth = 0.385 * d_corner;
+                pts_3d.row_mut(69).assign(&array![
+                    eye_center[0],
+                    eye_center[1],
+                    eye_center[2] - depth
+                ]);
+                continue;
+            }
+
+            let (d1, d2, pt) = if i == 0 {
+                let d1 = ((&lms.row(66).slice(s![..2]) - &lms.row(36).slice(s![..2]))
+                    .mapv(|x| x.powi(2)))
+                .sum()
+                .sqrt();
+                let d2 = ((&lms.row(66).slice(s![..2]) - &lms.row(39).slice(s![..2]))
+                    .mapv(|x| x.powi(2)))
+                .sum()
+                .sqrt();
+                let pt = (&pts_3d.row(36) * d1 + &pts_3d.row(39) * d2) / (d1 + d2);
+                (d1, d2, pt)
+            } else {
+                let d1 = ((&lms.row(67).slice(s![..2]) - &lms.row(42).slice(s![..2]))
+                    .mapv(|x| x.powi(2)))
+                .sum()
+                .sqrt();
+                let d2 = ((&lms.row(67).slice(s![..2]) - &lms.row(45).slice(s![..2]))
+                    .mapv(|x| x.powi(2)))
+                .sum()
+                .sqrt();
+                let pt = (&pts_3d.row(42) * d1 + &pts_3d.row(45) * d2) / (d1 + d2);
+                (d1, d2, pt)
+            };
+
+            if i < 2 {
+                let mut reference = rmat_array.dot(&pt);
+                reference = reference + &face_info.translation.as_ref().unwrap().view();
+                reference = self.camera.dot(&reference);
+                let depth = reference[2];
+                let mut pt_3d = array![lms[[66 + i, 0]] * depth, lms[[66 + i, 1]] * depth, depth];
+                pt_3d = self.inverse_camera.dot(&pt_3d);
+                pt_3d = pt_3d - &face_info.translation.as_ref().unwrap().view();
+                pt_3d = inverse_rotation.dot(&pt_3d);
+                pts_3d.row_mut(66 + i).assign(&pt_3d);
+            }
+        }
+
+        // Handle NaN values
+        for mut row in pts_3d.rows_mut() {
+            if row.iter().any(|&x| x.is_nan()) {
+                row.fill(0.0);
+            }
+        }
+
+        // Calculate final PnP error
+        let pnp_error = (pnp_error / (2.0 * image_pts.len() as f32)).sqrt();
+
+        // Handle high error cases
+        if pnp_error > 300.0 {
+            face_info.fail_count += 1;
+            if face_info.fail_count > 5 {
+                println!(
+                    "Detected anomaly when 3D fitting face {}. Resetting.",
+                    face_info.id
+                );
+                face_info.face_3d = self.face_3d.clone();
+                face_info.rotation = None;
+                face_info.translation = array![0.0, 0.0, 0.0].into();
+                face_info.update_counts = Array2::zeros((66, 2));
+                face_info.update_contour();
+            }
+        } else {
+            face_info.fail_count = 0;
+        }
+
+        // Get euler angles
+        let euler = decompose_rotation_matrix(&rmat_array)?;
+        let rotation_array: [[f32; 3]; 3] = [
+            [rmat_array[[0, 0]], rmat_array[[0, 1]], rmat_array[[0, 2]]],
+            [rmat_array[[1, 0]], rmat_array[[1, 1]], rmat_array[[1, 2]]],
+            [rmat_array[[2, 0]], rmat_array[[2, 1]], rmat_array[[2, 2]]],
+        ];
+        let quat = matrix_to_quaternion(rotation_array);
+
+        face_info.success = Some(true);
+        face_info.quaternion = Some(Array1::from_vec(quat.to_vec()));
+        face_info.euler = Some(euler);
+        face_info.pnp_error = pnp_error;
+        face_info.pts_3d = Some(pts_3d);
+        face_info.lms = Some(lms);
+
+        Ok(())
     }
 }
 
@@ -631,4 +902,20 @@ fn logit(mut p: f32, factor: f32) -> f32 {
     }
     p = p / (1.0 - p);
     p.ln() / factor
+}
+
+fn decompose_rotation_matrix(r: &Array2<f32>) -> Result<Array1<f32>, Box<dyn std::error::Error>> {
+    let sy = (r[[0, 0]].powi(2) + r[[1, 0]].powi(2)).sqrt();
+
+    let (pitch, yaw, roll) = if sy > 1e-6 {
+        (
+            (-r[[2, 0]]).atan2(sy),
+            r[[1, 0]].atan2(r[[0, 0]]),
+            r[[2, 1]].atan2(r[[2, 2]]),
+        )
+    } else {
+        ((-r[[2, 0]]).atan2(sy), 0.0, r[[1, 2]].atan2(r[[1, 1]]))
+    };
+
+    Ok(array![pitch, yaw, roll])
 }
