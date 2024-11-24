@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ort = { version = "=2.0.0-rc.4", default-features = false, features=["load-dynamic", "ndarray"] }
-opencv = { version = "0.93.3" } #, default-features = false, features = ["videoio", "rgb"] }
-fastrand = "2.2.0"
-ndarray = { version = "0.15", features = ["approx"] }
-itertools = "0.13.0"
-ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
+# ort = { version = "=2.0.0-rc.4", default-features = false, features=["load-dynamic", "ndarray"] }
+# opencv = { version = "0.93.3" } #, default-features = false, features = ["videoio", "rgb"] }
+# fastrand = "2.2.0"
+# ndarray = { version = "0.15", features = ["approx"] }
+# itertools = "0.13.0"
+# ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
 anyhow = "1.0.93"
+rscam = "*"
 glam = "0.29.2"
 memmap2 = "0.9.5"
 rusty-yunet = { version = "*", path = "../../rusty-yunet" }
