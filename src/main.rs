@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use anyhow::{Error, Result};
 use glam::Vec2;
 use itertools::Itertools;
@@ -5,7 +7,7 @@ use ndarray::{s, Array};
 use ort::{GraphOptimizationLevel, Session};
 extern crate opencv;
 use opencv::{
-    core::{Size2i, Vec3b, Vec3f, Vec3s, VecN, CV_32FC1, CV_32FC3},
+    core::{Size2i, Vec3b, Vec3f, VecN, CV_32FC1, CV_32FC3},
     imgproc,
     prelude::*,
     videoio::{
@@ -16,12 +18,12 @@ use opencv::{
 use std::f32::consts::PI;
 use std::io::Write;
 
-mod tracker;
+mod face_info;
 mod feature;
 mod feature_extractor;
-mod face_info;
-mod remedian;
 mod math;
+mod remedian;
+mod tracker;
 
 const WIDTH: usize = 640;
 const HEIGHT: usize = 480;
@@ -56,6 +58,10 @@ pub fn main() {
         match face_detector.detect_face(input) {
             Ok(face) => panic!("{:?}", face),
             Err(err) => eprintln!("No face detected, {:?}", err),
+        }
+
+        if face_detector.should_stop() {
+            break;
         }
 
         // println!("{:?}", input.shape());
@@ -109,9 +115,6 @@ impl FaceDetector {
     }
 
     fn detect_face(&self, input: ndarray::Array4<f32>) -> Result<[f32; 4]> {
-
-
-
         // let mut canvas = Canvas::new();
 
         // canvas.pen_color = [255, 0, 0, 255];
@@ -141,7 +144,7 @@ impl FaceDetector {
         let maxpool = output["maxpool"].try_extract_tensor::<f32>().unwrap();
 
         // outputs[0, 0, outputs[0, 0] != maxpool[0, 0]] = 0
-        let mut pred_data = predictions.slice_mut(s![0, 0, .., ..]);
+        let pred_data = predictions.slice_mut(s![0, 0, .., ..]);
         let maxpool_data = maxpool.slice(s![0, 0, .., ..]);
         // for (pred, &max) in pred_data.iter_mut().zip(maxpool_data.iter()) {
         //     if *pred != max {
@@ -158,7 +161,7 @@ impl FaceDetector {
             .collect();
 
         let test = detections.iter().take_while(|el| el > &&10).collect_vec();
-        let mut canvas = Canvas::new();
+        let canvas = Canvas::new();
 
         // canvas.pen_color = [255, 0, 0, 255];
         // for i in test {
@@ -220,6 +223,10 @@ impl FaceDetector {
         println!("{:?}", result);
         Ok(result)
     }
+
+    fn should_stop(&self) -> bool {
+        false
+    }
 }
 
 struct ImagePreprocessor {
@@ -278,8 +285,7 @@ impl ImagePreprocessor {
                     // pixel[channel] =
                     //     (pixel[channel] - self.mean_224[channel]) / self.std_224[channel];
 
-                    pixel[channel] =
-                        pixel[channel] * self.std_224[channel]; // + self.mean_224[channel];
+                    pixel[channel] *= self.std_224[channel]; // + self.mean_224[channel];
                 }
             }
         }
@@ -305,10 +311,10 @@ impl ImagePreprocessor {
         let array = ImagePreprocessor::mat_to_ndarray(&self.normalized).unwrap();
 
         // Step 1: Expand dimensions (add a batch dimension)
-        let expanded = array.insert_axis(ndarray::Axis(0)); // Adds a batch dimension at axis 0
+        // Adds a batch dimension at axis 0
 
         //let transposed = expanded.permuted_axes([0, 1, 2, 3]);
-        expanded
+        array.insert_axis(ndarray::Axis(0))
     }
 
     // Convert a Mat (OpenCV) to ndarray (Rust)
@@ -369,7 +375,7 @@ struct Canvas {
 
 impl Canvas {
     pub fn new() -> Self {
-        let mut buffer = vec![255u8; WIDTH * HEIGHT * 4];
+        let buffer = vec![255u8; WIDTH * HEIGHT * 4];
         let pen_color = [255, 255, 255, 255];
         Self { buffer, pen_color }
     }
@@ -381,6 +387,7 @@ impl Canvas {
     pub fn display(&self) {
         let file = std::fs::File::options()
             .create(true)
+            .truncate(true)
             .read(true)
             .write(true)
             .open("/tmp/imagesink")
@@ -391,7 +398,7 @@ impl Canvas {
         if let Some(err) = mmap.lock().err() {
             panic!("{err}");
         }
-        let _ = (&mut mmap[..]).write_all(&self.buffer.as_slice());
+        let _ = (&mut mmap[..]).write_all(self.buffer.as_slice());
     }
 
     fn draw_curve(&mut self, start: Vec2, control: Vec2, end: Vec2) {
@@ -426,9 +433,7 @@ impl Canvas {
         let bottom_y = (pos.y + radius) as usize;
         for offset_x in left_x..=right_x {
             for offset_y in top_y..=bottom_y {
-                if ((offset_x as f32 - pos.x as f32).powi(2)
-                    + (offset_y as f32 - pos.y as f32).powi(2))
-                .sqrt()
+                if ((offset_x as f32 - pos.x).powi(2) + (offset_y as f32 - pos.y).powi(2)).sqrt()
                     < radius
                 {
                     self.draw_point(Vec2::new(offset_x as f32, offset_y as f32));

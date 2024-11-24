@@ -7,7 +7,7 @@ use opencv::{
     imgproc::{get_rotation_matrix_2d, warp_affine, INTER_LINEAR},
     prelude::*,
 };
-use ort::{Environment, GraphOptimizationLevel, Session, SessionBuilder};
+use ort::{Environment, GraphOptimizationLevel, Session};
 
 use std::ops::Sub;
 use std::{f32::consts::PI, path::Path};
@@ -70,7 +70,7 @@ impl Tracker {
         environment: Environment,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Set up model paths
-        let models = vec![
+        let models = [
             "lm_model0_opt.onnx",
             "lm_model1_opt.onnx",
             "lm_model2_opt.onnx",
@@ -79,7 +79,7 @@ impl Tracker {
         ];
         let model_path = model_dir
             .unwrap_or(Path::new("models"))
-            .join(&models[model_type as usize]);
+            .join(models[model_type as usize]);
         let gaze_model_path = model_dir
             .unwrap_or(Path::new("models"))
             .join("mnv3_gaze32_split_opt.onnx");
@@ -168,7 +168,7 @@ impl Tracker {
         }
 
         // Create and update FaceInfo
-        let mut face_info = FaceInfo::new(0, &self);
+        let mut face_info = FaceInfo::new(0, self);
 
         // Get eye state
         let eye_state = match self.get_eye_state(frame, &landmarks) {
@@ -565,7 +565,7 @@ impl Tracker {
 
         // Adjust landmarks
         let offset = Array1::from_vec(vec![x1 as f32, y1 as f32]);
-        let adjusted_lms = (&landmarks - &offset).mapv(|x| x as f32);
+        let adjusted_lms = (&landmarks - &offset).mapv(|x| x);
 
         Ok((roi, adjusted_lms, offset))
     }
@@ -657,7 +657,7 @@ impl Tracker {
         // Create landmarks array with eye state
         let mut lms = Array2::zeros((70, 3));
         lms.slice_mut(s![..66, ..])
-            .assign(&face_info.lms.as_ref().unwrap());
+            .assign(face_info.lms.as_ref().unwrap());
         if let Some(eye_state) = &face_info.eye_state {
             for i in 0..2 {
                 lms[[66 + i, 0]] = eye_state[[i, 2]]; // x
@@ -680,8 +680,9 @@ impl Tracker {
             .collect();
 
         // Convert camera matrix and distortion coefficients
-        let camera_mat = Mat::from_slice(&self.camera.as_slice().unwrap())?;
-        let dist_coeffs: opencv::core::Vector<f32> = opencv::core::Vector::from_iter(self.dist_coeffs.iter().cloned());
+        let camera_mat = Mat::from_slice(self.camera.as_slice().unwrap())?;
+        let dist_coeffs: opencv::core::Vector<f32> =
+            opencv::core::Vector::from_iter(self.dist_coeffs.iter().cloned());
 
         // Solve PnP
         let (success, rotation, translation) = if let Some(rot) = &face_info.rotation {
@@ -834,12 +835,12 @@ impl Tracker {
 
             if i < 2 {
                 let mut reference = rmat_array.dot(&pt);
-                reference = reference + &face_info.translation.as_ref().unwrap().view();
+                reference += &face_info.translation.as_ref().unwrap().view();
                 reference = self.camera.dot(&reference);
                 let depth = reference[2];
                 let mut pt_3d = array![lms[[66 + i, 0]] * depth, lms[[66 + i, 1]] * depth, depth];
                 pt_3d = self.inverse_camera.dot(&pt_3d);
-                pt_3d = pt_3d - &face_info.translation.as_ref().unwrap().view();
+                pt_3d -= &face_info.translation.as_ref().unwrap().view();
                 pt_3d = inverse_rotation.dot(&pt_3d);
                 pts_3d.row_mut(66 + i).assign(&pt_3d);
             }

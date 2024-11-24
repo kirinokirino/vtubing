@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 /// If ordered is false, the slice will be sorted first.
 fn median(lst: &mut [f32], ordered: bool) -> f32 {
     assert!(!lst.is_empty(), "median needs a non-empty list");
-    
+
     if !ordered {
         lst.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     }
@@ -76,8 +76,8 @@ impl Remedian {
     /// Internal method to compute the median of the current bucket
     fn median_prim(&mut self) -> f32 {
         if self.cached_median.is_none() {
-            let mut values = &mut self.all;
-            self.cached_median = Some(median(&mut values, false));
+            let values = &mut self.all;
+            self.cached_median = Some(median(values, false));
         }
         self.cached_median.unwrap()
     }

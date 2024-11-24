@@ -49,7 +49,7 @@ impl Feature {
         if self.max_feature_updates > 0 && self.first_seen == -1.0 {
             self.first_seen = now;
         }
-        
+
         let new = self.update_state(x, now);
         let filtered = self.last * self.alpha + new * (1.0 - self.alpha);
         self.last = filtered;
@@ -57,8 +57,9 @@ impl Feature {
     }
 
     fn update_state(&mut self, x: f32, now: f32) -> f32 {
-        let updating = self.updating && (self.max_feature_updates == 0 
-            || now - self.first_seen < self.max_feature_updates as f32);
+        let updating = self.updating
+            && (self.max_feature_updates == 0
+                || now - self.first_seen < self.max_feature_updates as f32);
 
         if updating {
             self.median.add(x);
