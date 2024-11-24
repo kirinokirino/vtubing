@@ -1,16 +1,44 @@
 #![allow(unused)]
-
-use anyhow::{Error, Result};
 use glam::Vec2;
-use image::{ImageBuffer, Rgb};
-use rscam::{Camera, Config};
+use rscam::{Camera, Config, Frame};
 use rusty_yunet::FaceLandmarks;
 
 use std::f32::consts::PI;
-use std::io::Write;
+use std::io::{Read, Write};
 const WIDTH: usize = 640;
 const HEIGHT: usize = 480;
 
+fn yuyv_to_bgr(yuyv_data: &[u8], width: usize, height: usize) -> Vec<u8> {
+    assert!(
+        yuyv_data.len() == width * height * 2,
+        "Invalid YUYV data size"
+    );
+
+    let mut bgr_data = Vec::with_capacity(width * height * 3);
+
+    for chunk in yuyv_data.chunks_exact(4) {
+        let y0 = chunk[0] as f32;
+        let u = chunk[1] as f32 - 128.0;
+        let y1 = chunk[2] as f32;
+        let v = chunk[3] as f32 - 128.0;
+
+        // Convert YUV to BGR for the first pixel
+        bgr_data.extend_from_slice(&yuv_to_bgr(y0, u, v));
+
+        // Convert YUV to BGR for the second pixel
+        bgr_data.extend_from_slice(&yuv_to_bgr(y1, u, v));
+    }
+
+    bgr_data
+}
+
+fn yuv_to_bgr(y: f32, u: f32, v: f32) -> [u8; 3] {
+    let r = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
+    let g = (y - 0.344 * u - 0.714 * v).clamp(0.0, 255.0) as u8;
+    let b = (y + 1.772 * u).clamp(0.0, 255.0) as u8;
+
+    [b, g, r] // Swapped order to produce BGR
+}
 pub fn main() {
     let mut canvas = Canvas::new();
 
@@ -19,12 +47,12 @@ pub fn main() {
     // Configure the camera
     camera
         .start(&Config {
-            interval: (1, 60), // 30 FPS
+            interval: (1, 30), // 30 FPS
             resolution: (640, 480),
             // [0]: 'YUYV' (YUYV 4:2:2)
             // [1]: 'MJPG' (Motion-JPEG, compressed)
             // [2]: 'NV12' (Y/UV 4:2:0)
-            format: b"MJPG", // Supported formats can be checked via `v4l2-ctl --list-formats`
+            format: b"YUYV", // Supported formats can be checked via `v4l2-ctl --list-formats`
             ..Default::default()
         })
         .unwrap();
@@ -35,26 +63,35 @@ pub fn main() {
         let frame = camera.capture().unwrap();
         println!("Captured frame size: {}", frame.len());
 
-        let img = image::load_from_memory(&frame).unwrap();
-        // Convert to an ImageBuffer (in case you need to work with it further)
-        let img_buffer: ImageBuffer<Rgb<u8>, Vec<u8>> = img.to_rgb8();
-        let faces = rusty_yunet::detect_faces(&img_buffer).unwrap();
+        let mut image = yuyv_to_bgr(
+            &frame,
+            frame.resolution.0 as usize,
+            frame.resolution.1 as usize,
+        );
+
+        let faces = rusty_yunet::detect_faces(
+            &image,
+            frame.resolution.0 as usize,
+            frame.resolution.1 as usize,
+        )
+        .unwrap();
 
         for face in faces {
             let c = (face.confidence() * 255.0) as u8;
             canvas.pen_color = [c, c, c, 255];
-            let FaceLandmarks::<i32> {
+            let FaceLandmarks {
                 right_eye,
                 left_eye,
                 nose,
                 mouth_right,
                 mouth_left,
             } = face.landmarks();
-            canvas.draw_circle(Vec2::new(right_eye.0 as f32, right_eye.1 as f32), 5.0);
-            canvas.draw_circle(Vec2::new(left_eye.0 as f32, left_eye.1 as f32), 5.0);
-            canvas.draw_circle(Vec2::new(nose.0 as f32, nose.1 as f32), 5.0);
-            canvas.draw_circle(Vec2::new(mouth_right.0 as f32, mouth_right.1 as f32), 5.0);
-            canvas.draw_circle(Vec2::new(mouth_left.0 as f32, mouth_left.1 as f32), 5.0);
+            println!("{:?}", nose);
+            canvas.draw_circle(*right_eye, 5.0);
+            canvas.draw_circle(*left_eye, 5.0);
+            canvas.draw_circle(*nose, 5.0);
+            canvas.draw_circle(*mouth_right, 5.0);
+            canvas.draw_circle(*mouth_left, 5.0);
         }
         canvas.display();
     }
