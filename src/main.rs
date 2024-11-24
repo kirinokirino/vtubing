@@ -4,89 +4,14 @@ use anyhow::{Error, Result};
 use glam::Vec2;
 use image::{ImageBuffer, Rgb};
 use rscam::{Camera, Config};
-// use itertools::Itertools;
-// use ndarray::{s, Array};
-// use ort::{GraphOptimizationLevel, Session};
-// extern crate opencv;
-// use opencv::{
-//     core::{CV_32FC1, CV_32FC3},
-//     imgproc,
-//     prelude::*,
-//     videoio::{
-//         VideoCapture, VideoCaptureTrait, CAP_ANY, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH,
-//     },
-// };
 use rusty_yunet::FaceLandmarks;
 
 use std::f32::consts::PI;
 use std::io::Write;
-
-// mod face_info;
-// mod feature;
-// mod feature_extractor;
-// mod math;
-// mod remedian;
-// mod tracker;
-// use tracker::Tracker;
-
 const WIDTH: usize = 640;
 const HEIGHT: usize = 480;
 
-// fn mat_to_imagebuffer(mat: &Mat) -> opencv::Result<ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
-//     // Ensure the Mat is in RGB format
-//     let mut rgb_mat = Mat::default();
-//     imgproc::cvt_color(mat, &mut rgb_mat, imgproc::COLOR_BGR2RGB, 0)?;
-
-//     // Get the dimensions of the Mat
-//     let (width, height) = (rgb_mat.cols(), rgb_mat.rows());
-
-//     // Get the pixel data from the Mat
-//     let data = rgb_mat
-//         .data_typed::<opencv::core::Vec3b>()
-//         .expect("Failed to access Mat data. Ensure Mat is continuous and of correct type.")
-//         .into_iter()
-//         .fold(Vec::new(), |mut acc, e| {
-//             acc.extend(e.iter());
-//             acc
-//         });
-
-//     // Convert the data to an ImageBuffer
-//     let img_buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>> =
-//         ImageBuffer::from_vec(width as u32, height as u32, data.to_vec())
-//             .expect("Failed to create ImageBuffer. Dimensions might be incorrect.");
-
-//     Ok(img_buffer)
-// }
-
 pub fn main() {
-    // let path = "/home/k/Documents/Rust/k/vtubing/onnx/lib/libonnxruntime.so.1.20.0";
-    // ort::init_from(path).commit().unwrap();
-
-    // let num_threads = 4;
-    // let face_detector = FaceDetector::new(num_threads, 0.6);
-    // let mut tracker = Tracker::new(
-    //     WIDTH.try_into().unwrap(),
-    //     HEIGHT.try_into().unwrap(),
-    //     4,
-    //     4,
-    //     true,
-    //     900,
-    //     true,
-    //     2,
-    // )
-    // .unwrap();
-
-    // // Open the video capture (0 for default webcam, or a video file path)
-    // let mut capture = VideoCapture::new(0, CAP_ANY).unwrap(); // 0 for default webcam
-    //                                                           // Set the capture resolution to 640x480
-    // capture.set(CAP_PROP_FRAME_WIDTH, 640.0).unwrap();
-    // capture.set(CAP_PROP_FRAME_HEIGHT, 480.0).unwrap();
-    // if !capture.is_opened().unwrap() {
-    //     panic!("Error: Couldn't open video capture.");
-    // }
-
-    // let mut preprocessor = ImagePreprocessor::new();
-
     let mut canvas = Canvas::new();
 
     let mut camera = Camera::new("/dev/video0").unwrap();
@@ -107,22 +32,6 @@ pub fn main() {
     loop {
         canvas.pen_color = [0, 0, 0, 255];
         canvas.draw_square(Vec2::new(0.0, 0.0), Vec2::new(640.0, 480.0));
-        // Capture a frame from the video capture
-        // capture.read(&mut preprocessor.frame).unwrap();
-        // if preprocessor.frame.empty() {
-        //     eprintln!("Error: No frame captured.");
-        //     continue;
-        // }
-
-        // let opencv::core::Size { width, height } = &preprocessor.frame.size().unwrap();
-        // let image = mat_to_imagebuffer(&preprocessor.frame).unwrap();
-        // let image = ImageBuffer::from_vec(
-        //     *width as usize,
-        //     *height as usize,
-        //     &preprocessor.frame.,
-        // );
-
-        // Capture a single frame
         let frame = camera.capture().unwrap();
         println!("Captured frame size: {}", frame.len());
 
