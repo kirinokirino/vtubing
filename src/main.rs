@@ -2,18 +2,20 @@
 
 use anyhow::{Error, Result};
 use glam::Vec2;
+use image::ImageBuffer;
 use itertools::Itertools;
 use ndarray::{s, Array};
 use ort::{GraphOptimizationLevel, Session};
 extern crate opencv;
 use opencv::{
-    core::{Size2i, Vec3b, Vec3f, VecN, CV_32FC1, CV_32FC3},
+    core::{CV_32FC1, CV_32FC3},
     imgproc,
     prelude::*,
     videoio::{
         VideoCapture, VideoCaptureTrait, CAP_ANY, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH,
     },
 };
+use rusty_yunet::FaceLandmarks;
 
 use std::f32::consts::PI;
 use std::io::Write;
@@ -24,9 +26,36 @@ mod feature_extractor;
 mod math;
 mod remedian;
 mod tracker;
+use tracker::Tracker;
 
 const WIDTH: usize = 640;
 const HEIGHT: usize = 480;
+
+fn mat_to_imagebuffer(mat: &Mat) -> opencv::Result<ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
+    // Ensure the Mat is in RGB format
+    let mut rgb_mat = Mat::default();
+    imgproc::cvt_color(mat, &mut rgb_mat, imgproc::COLOR_BGR2RGB, 0)?;
+
+    // Get the dimensions of the Mat
+    let (width, height) = (rgb_mat.cols(), rgb_mat.rows());
+
+    // Get the pixel data from the Mat
+    let data = rgb_mat
+        .data_typed::<opencv::core::Vec3b>()
+        .expect("Failed to access Mat data. Ensure Mat is continuous and of correct type.")
+        .into_iter()
+        .fold(Vec::new(), |mut acc, e| {
+            acc.extend(e.iter());
+            acc
+        });
+
+    // Convert the data to an ImageBuffer
+    let img_buffer: ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_vec(width as u32, height as u32, data.to_vec())
+            .expect("Failed to create ImageBuffer. Dimensions might be incorrect.");
+
+    Ok(img_buffer)
+}
 
 pub fn main() {
     let path = "/home/k/Documents/Rust/k/vtubing/onnx/lib/libonnxruntime.so.1.20.0";
@@ -34,6 +63,17 @@ pub fn main() {
 
     let num_threads = 4;
     let face_detector = FaceDetector::new(num_threads, 0.6);
+    let mut tracker = Tracker::new(
+        WIDTH.try_into().unwrap(),
+        HEIGHT.try_into().unwrap(),
+        4,
+        4,
+        true,
+        900,
+        true,
+        2,
+    )
+    .unwrap();
 
     // Open the video capture (0 for default webcam, or a video file path)
     let mut capture = VideoCapture::new(0, CAP_ANY).unwrap(); // 0 for default webcam
@@ -45,6 +85,75 @@ pub fn main() {
     }
 
     let mut preprocessor = ImagePreprocessor::new();
+
+    let mut canvas = Canvas::new();
+
+    loop {
+        canvas.pen_color = [0, 0, 0, 255];
+        canvas.draw_square(Vec2::new(0.0, 0.0), Vec2::new(640.0, 480.0));
+        // Capture a frame from the video capture
+        capture.read(&mut preprocessor.frame).unwrap();
+        if preprocessor.frame.empty() {
+            eprintln!("Error: No frame captured.");
+            continue;
+        }
+
+        let opencv::core::Size { width, height } = &preprocessor.frame.size().unwrap();
+        let image = mat_to_imagebuffer(&preprocessor.frame).unwrap();
+        // let image = ImageBuffer::from_vec(
+        //     *width as usize,
+        //     *height as usize,
+        //     &preprocessor.frame.,
+        // );
+        let faces = rusty_yunet::detect_faces(&image).unwrap();
+
+        for face in faces {
+            let c = (face.confidence() * 255.0) as u8;
+            canvas.pen_color = [c, c, c, 255];
+            let FaceLandmarks::<i32> {
+                right_eye,
+                left_eye,
+                nose,
+                mouth_right,
+                mouth_left,
+            } = face.landmarks();
+            canvas.draw_circle(Vec2::new(right_eye.0 as f32, right_eye.1 as f32), 5.0);
+            canvas.draw_circle(Vec2::new(left_eye.0 as f32, left_eye.1 as f32), 5.0);
+            canvas.draw_circle(Vec2::new(nose.0 as f32, nose.1 as f32), 5.0);
+            canvas.draw_circle(Vec2::new(mouth_right.0 as f32, mouth_right.1 as f32), 5.0);
+            canvas.draw_circle(Vec2::new(mouth_left.0 as f32, mouth_left.1 as f32), 5.0);
+        }
+        canvas.display();
+    }
+
+    loop {
+        canvas.pen_color = [0, 0, 0, 255];
+        canvas.draw_square(Vec2::new(0.0, 0.0), Vec2::new(640.0, 480.0));
+        // Capture a frame from the video capture
+        capture.read(&mut preprocessor.frame).unwrap();
+        if preprocessor.frame.empty() {
+            eprintln!("Error: No frame captured.");
+            continue;
+        }
+
+        tracker.predict(&preprocessor.frame);
+
+        let (w, h) = tracker.face_3d.dim();
+        for row in tracker.face_3d.rows() {
+            let s = row.as_slice().unwrap();
+            let (x, y, confidence) = (s[0], s[1], s[2]);
+            let c = 100u8; //(confidence * 255.0) as u8;
+            canvas.pen_color = [c, c, c, 255];
+            canvas.draw_point(Vec2::new(x as f32, y as f32));
+            println!("{:.2}\t{:.2}\t{:.2}\t", x, y, confidence);
+        }
+        println!();
+        // canvas.pen_color = [255, 255, 255, 255];
+        // let (x1, y1, x2, y2) = tracker.face_bounding_box.unwrap();
+        // canvas.draw_square(Vec2::new(x1, y1), Vec2::new(x2, y2));
+        canvas.display();
+    }
+
     loop {
         // Capture a frame from the video capture
         capture.read(&mut preprocessor.frame).unwrap();
@@ -261,7 +370,7 @@ impl ImagePreprocessor {
         imgproc::resize(
             &self.frame,
             &mut self.resized,
-            Size2i::new(224, 224),
+            opencv::core::Size2i::new(224, 224),
             0.0,
             0.0,
             imgproc::INTER_LINEAR,
@@ -280,7 +389,8 @@ impl ImagePreprocessor {
         // Normalize using (pixel - mean) / std
         for row in 0..self.normalized.rows() {
             for col in 0..self.normalized.cols() {
-                let pixel: &mut VecN<f32, 3> = self.normalized.at_2d_mut(row, col).unwrap();
+                let pixel: &mut opencv::core::VecN<f32, 3> =
+                    self.normalized.at_2d_mut(row, col).unwrap();
                 for channel in 0..3usize {
                     // pixel[channel] =
                     //     (pixel[channel] - self.mean_224[channel]) / self.std_224[channel];
@@ -327,7 +437,7 @@ impl ImagePreprocessor {
         let cols = mat.cols();
         let channels = mat.channels();
 
-        let mat_data = mat.data_typed::<Vec3f>().unwrap();
+        let mat_data = mat.data_typed::<opencv::core::VecN<f32, 3>>().unwrap();
         let flattened_data: Vec<f32> = mat_data
             .iter()
             .flat_map(|vec| vec.0) // `vec.0` accesses the internal `[f32; 3]` in Vec3f
@@ -356,9 +466,9 @@ impl ImagePreprocessor {
         for y in 0..self.frame.rows() {
             for x in 0..self.frame.cols() {
                 canvas.pen_color = [
-                    self.frame.at_2d::<Vec3b>(y, x).unwrap()[2],
-                    self.frame.at_2d::<Vec3b>(y, x).unwrap()[1],
-                    self.frame.at_2d::<Vec3b>(y, x).unwrap()[0],
+                    self.frame.at_2d::<opencv::core::VecN<u8, 3>>(y, x).unwrap()[2],
+                    self.frame.at_2d::<opencv::core::VecN<u8, 3>>(y, x).unwrap()[1],
+                    self.frame.at_2d::<opencv::core::VecN<u8, 3>>(y, x).unwrap()[0],
                     255,
                 ];
                 canvas.draw_point(Vec2::new(x as f32, y as f32));
@@ -387,7 +497,7 @@ impl Canvas {
     pub fn display(&self) {
         let file = std::fs::File::options()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open("/tmp/imagesink")

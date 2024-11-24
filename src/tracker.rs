@@ -3,11 +3,11 @@ use ndarray::{array, s, stack, Array1, Array2, Array3, Array4, Axis, Ix3, Ix4};
 use ndarray_linalg::solve::Inverse;
 use opencv::{
     calib3d::{rodrigues, solve_pnp, SOLVEPNP_ITERATIVE},
-    core::{no_array, Mat, Point2f, Point3f, Rect, Scalar, Size, Vec3b, BORDER_CONSTANT, CV_32F},
+    core::{no_array, BORDER_CONSTANT, CV_32F},
     imgproc::{get_rotation_matrix_2d, warp_affine, INTER_LINEAR},
-    prelude::*,
+    prelude::{MatExprTraitConst, MatTraitConst, MatTraitConstManual},
 };
-use ort::{Environment, GraphOptimizationLevel, Session};
+use ort::{GraphOptimizationLevel, Session};
 
 use std::ops::Sub;
 use std::{f32::consts::PI, path::Path};
@@ -17,7 +17,7 @@ use crate::{
     math::{compensate_rotation, matrix_to_quaternion, rotate},
 };
 
-fn mat_to_array2(mat: &Mat) -> Result<Array2<f32>, Box<dyn std::error::Error>> {
+fn mat_to_array2(mat: &opencv::core::Mat) -> Result<Array2<f32>, Box<dyn std::error::Error>> {
     let rows = mat.rows();
     let cols = mat.cols();
     let data: Vec<f32> = mat.data_typed()?.to_vec();
@@ -60,14 +60,11 @@ impl Tracker {
         width: i32,
         height: i32,
         model_type: i32,
-        bbox_growth: f32,
         max_threads: usize,
-        model_dir: Option<&Path>,
         no_gaze: bool,
         max_feature_updates: i32,
         static_model: bool,
         feature_level: i32,
-        environment: Environment,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Set up model paths
         let models = [
@@ -77,12 +74,9 @@ impl Tracker {
             "lm_model3_opt.onnx",
             "lm_model4_opt.onnx",
         ];
-        let model_path = model_dir
-            .unwrap_or(Path::new("models"))
-            .join(models[model_type as usize]);
-        let gaze_model_path = model_dir
-            .unwrap_or(Path::new("models"))
-            .join("mnv3_gaze32_split_opt.onnx");
+        let model_dir = Path::new("models");
+        let model_path = model_dir.join(models[model_type as usize]);
+        let gaze_model_path = model_dir.join("mnv3_gaze32_split_opt.onnx");
 
         // Create sessions
         let session = Session::builder()
@@ -138,9 +132,9 @@ impl Tracker {
             frame_count: 0,
             width,
             height,
-            threshold: 0.6,
+            threshold: 0.06,
             max_threads,
-            bbox_growth,
+            bbox_growth: 0.0,
             no_gaze,
             debug_gaze: false,
             feature_level,
@@ -149,7 +143,14 @@ impl Tracker {
         })
     }
 
-    pub fn predict(&mut self, frame: &Mat) -> Option<FaceInfo> {
+    pub fn predict(&mut self, frame: &opencv::core::Mat) -> Option<FaceInfo> {
+        // for bytes in frame.data_bytes().iter() {
+        //     print!("{:?} ", bytes);
+        // }
+        // if frame.data_bytes().iter().all(|el| **el == [0u8]) {
+        //     eprintln!("Skipping empty frame");
+        //     return None;
+        // }
         self.frame_count += 1;
 
         // Get confidence and landmarks
@@ -159,7 +160,10 @@ impl Tracker {
             frame,
         ) {
             Ok((conf, lms)) => (conf?, lms?),
-            Err(_) => return None,
+            Err(e) => {
+                panic!("{:?}", e);
+                return None;
+            }
         };
 
         if confidence <= self.threshold {
@@ -221,7 +225,7 @@ impl Tracker {
         let (crop_x1, crop_y1, scale_x, scale_y) = crop_info;
         const TENSOR_DIM: usize = 28;
         const RESOLUTION: f32 = 223.0; // RESOLUTION - 1
-        const FACIAL_LANDMARKS_COUNT: usize = 70;
+        const FACIAL_LANDMARKS_COUNT: usize = 66;
 
         let landmarks_range = 0..FACIAL_LANDMARKS_COUNT;
         let x_offsets_range = FACIAL_LANDMARKS_COUNT..(FACIAL_LANDMARKS_COUNT * 2);
@@ -304,7 +308,7 @@ impl Tracker {
     fn get_confidence_and_landmarks(
         &self,
         face_bounding_box: (f32, f32, f32, f32),
-        image: &Mat,
+        image: &opencv::core::Mat,
     ) -> Result<(Option<f32>, Option<Array2<f32>>), Box<dyn std::error::Error>> {
         const RESOLUTION: i32 = 224;
         const MEAN_224: f32 = 0.485;
@@ -328,28 +332,31 @@ impl Tracker {
 
         if crop_x2 - crop_x1 >= 4 && crop_y2 - crop_y1 >= 4 {
             // Crop and convert image
-            let roi = Mat::roi(
+            let roi = opencv::core::Mat::roi(
                 image,
                 opencv::core::Rect::new(crop_x1, crop_y1, crop_x2 - crop_x1, crop_y2 - crop_y1),
             )?;
 
             let mut resized = unsafe {
-                Mat::new_size(Size::new(RESOLUTION, RESOLUTION), opencv::core::CV_32FC3)
+                opencv::core::Mat::new_size(
+                    opencv::core::Size::new(RESOLUTION, RESOLUTION),
+                    opencv::core::CV_32FC3,
+                )
             }?;
             opencv::imgproc::resize(
                 &roi,
                 &mut resized,
-                Size::new(RESOLUTION, RESOLUTION),
+                opencv::core::Size::new(RESOLUTION, RESOLUTION),
                 0.0,
                 0.0,
                 opencv::imgproc::INTER_LINEAR,
             )?;
 
             // Convert to RGB float32 array and normalize
-            let mut float_img = Mat::new_size_with_default(
-                Size::new(RESOLUTION, RESOLUTION),
+            let mut float_img = opencv::core::Mat::new_size_with_default(
+                opencv::core::Size::new(RESOLUTION, RESOLUTION),
                 opencv::core::CV_32FC3,
-                Scalar::all(0.0),
+                opencv::core::Scalar::all(122.0),
             )?;
             resized.convert_to(
                 &mut float_img,
@@ -370,6 +377,14 @@ impl Tracker {
                 }
             }
 
+            // panic!(
+            //     "{:?}",
+            //     input_tensor
+            //         .shape()
+            //         .into_iter()
+            //         .cloned()
+            //         .collect::<Vec<usize>>()
+            // );
             // Run inference
             let output = self
                 .session
@@ -379,6 +394,7 @@ impl Tracker {
             // Process landmarks
             let (confidence, landmarks) = self.landmarks(
                 &output_tensor
+                    .index_axis(Axis(0), 0)
                     .view()
                     .into_dimensionality::<Ix3>()?
                     .to_owned(),
@@ -393,7 +409,7 @@ impl Tracker {
 
     pub fn get_eye_state(
         &self,
-        frame: &Mat,
+        frame: &opencv::core::Mat,
         lms: &Array2<f32>,
     ) -> Result<Array2<f32>, Box<dyn std::error::Error>> {
         if self.no_gaze {
@@ -534,9 +550,9 @@ impl Tracker {
 
     fn extract_face(
         &self,
-        frame: &Mat,
+        frame: &opencv::core::Mat,
         lms: &Array2<f32>,
-    ) -> Result<(Mat, Array2<f32>, Array1<f32>), Box<dyn std::error::Error>> {
+    ) -> Result<(opencv::core::Mat, Array2<f32>, Array1<f32>), Box<dyn std::error::Error>> {
         let landmarks = lms.slice(s![.., ..2]);
 
         // Find bounding box
@@ -561,7 +577,8 @@ impl Tracker {
             .min(frame.rows() as f32) as i32;
 
         // Crop frame
-        let roi = Mat::roi(frame, Rect::new(x1, y1, x2 - x1, y2 - y1))?.try_clone()?;
+        let roi = opencv::core::Mat::roi(frame, opencv::core::Rect::new(x1, y1, x2 - x1, y2 - y1))?
+            .try_clone()?;
 
         // Adjust landmarks
         let offset = Array1::from_vec(vec![x1 as f32, y1 as f32]);
@@ -572,11 +589,11 @@ impl Tracker {
 
     fn prepare_eye(
         &self,
-        frame: &Mat,
-        full_frame: &Mat,
+        frame: &opencv::core::Mat,
+        full_frame: &opencv::core::Mat,
         corners: &Array2<f32>,
         flip: bool,
-    ) -> Result<(Option<Array4<f32>>, f32, f32, Vec<f32>, Point2f, f32), Box<dyn std::error::Error>>
+    ) -> Result<(Option<Array4<f32>>, f32, f32, Vec<f32>, Vec2, f32), Box<dyn std::error::Error>>
     {
         const STD_32: f32 = 0.456;
         const MEAN_32: f32 = 0.485;
@@ -587,7 +604,7 @@ impl Tracker {
         );
 
         let (c2_comp, angle) = compensate_rotation(c1, c2);
-        let center = Point2f::new((c1.x + c2_comp.x) / 2.0, (c1.y + c2_comp.y) / 2.0);
+        let center = opencv::core::Point2f::new((c1.x + c2_comp.x) / 2.0, (c1.y + c2_comp.y) / 2.0);
 
         let radius = ((c1.x - c2_comp.x).powi(2) + (c1.y - c2_comp.y).powi(2)).sqrt() / 2.0;
         let scale = vec![radius * 1.4 / 32.0, radius * 1.2 / 32.0];
@@ -602,12 +619,12 @@ impl Tracker {
         let y2 = (center.y + scale[1]).max(0.0).min(h);
 
         if (x2 - x1) < 1.0 || (y2 - y1) < 1.0 {
-            return Ok((None, 0.0, 0.0, scale, Point2f::new(c1.x, c1.y), angle));
+            return Ok((None, 0.0, 0.0, scale, Vec2::new(c1.x, c1.y), angle));
         }
 
         // Rotate and crop image
         let rot_mat = get_rotation_matrix_2d(center, (angle * 180.0 / PI).into(), 1.0)?;
-        let mut rotated = Mat::default();
+        let mut rotated = opencv::core::Mat::default();
         warp_affine(
             frame,
             &mut rotated,
@@ -615,12 +632,12 @@ impl Tracker {
             frame.size()?,
             INTER_LINEAR,
             BORDER_CONSTANT,
-            Scalar::all(0.0),
+            opencv::core::Scalar::all(0.0),
         )?;
 
-        let mut eye_region = Mat::roi(
+        let mut eye_region = opencv::core::Mat::roi(
             &rotated,
-            Rect::new(x1 as i32, y1 as i32, (x2 - x1) as i32, (y2 - y1) as i32),
+            opencv::core::Rect::new(x1 as i32, y1 as i32, (x2 - x1) as i32, (y2 - y1) as i32),
         )?
         .try_clone()?;
 
@@ -629,11 +646,11 @@ impl Tracker {
         }
 
         // Resize to 32x32
-        let mut resized = Mat::default();
+        let mut resized = opencv::core::Mat::default();
         opencv::imgproc::resize(
             &eye_region,
             &mut resized,
-            Size::new(32, 32),
+            opencv::core::Size::new(32, 32),
             0.0,
             0.0,
             INTER_LINEAR,
@@ -643,14 +660,14 @@ impl Tracker {
         let mut tensor = Array4::<f32>::zeros((1, 3, 32, 32));
         for y in 0..32 {
             for x in 0..32 {
-                let pixel = resized.at_2d::<Vec3b>(y, x)?;
+                let pixel = resized.at_2d::<opencv::core::VecN<u8, 3>>(y, x)?;
                 for c in 0..3 {
                     tensor[[0, c, y as usize, x as usize]] = (pixel[c] as f32) * STD_32 + MEAN_32;
                 }
             }
         }
 
-        Ok((Some(tensor), x1, y1, scale, Point2f::new(c1.x, c1.y), angle))
+        Ok((Some(tensor), x1, y1, scale, Vec2::new(c1.x, c1.y), angle))
     }
 
     fn estimate_depth(&self, face_info: &mut FaceInfo) -> Result<(), Box<dyn std::error::Error>> {
@@ -666,58 +683,63 @@ impl Tracker {
             }
         }
 
-        let object_pts: opencv::core::Vector<Point3f> = face_info
+        let object_points: opencv::core::Vector<opencv::core::Point3f> = face_info
             .contour
             .rows()
             .into_iter()
-            .map(|i| Point3f::new(i[0], i[1], i[2]))
+            .map(|i| opencv::core::Point3f::new(i[0], i[1], i[2]))
             .collect();
 
-        let image_pts: opencv::core::Vector<Point2f> = face_info
+        let image_points: opencv::core::Vector<opencv::core::Point_<f32>> = face_info
             .contour_pts
             .iter()
-            .map(|&idx| Point2f::new(lms[[idx, 0]], lms[[idx, 1]]))
+            .map(|&idx| opencv::core::Point2f::new(lms[[idx, 0]], lms[[idx, 1]]))
             .collect();
 
         // Convert camera matrix and distortion coefficients
-        let camera_mat = Mat::from_slice(self.camera.as_slice().unwrap())?;
+        let camera_mat = opencv::core::Mat::from_slice(self.camera.as_slice().unwrap())?;
         let dist_coeffs: opencv::core::Vector<f32> =
             opencv::core::Vector::from_iter(self.dist_coeffs.iter().cloned());
 
         // Solve PnP
         let (success, rotation, translation) = if let Some(rot) = &face_info.rotation {
-            let mut rvec = Mat::from_slice(&rot.to_vec())?.try_clone()?;
-            let mut tvec =
-                Mat::from_slice(&face_info.translation.as_ref().unwrap().to_vec())?.try_clone()?;
+            let mut rvec = opencv::core::Vector::from_slice(&[0.0, 0.0, 0.0]);
+            let mut tvec = opencv::core::Vector::from_slice(&[0.0, 0.0, 0.0]);
 
             let success = solve_pnp(
-                &object_pts,
-                &image_pts,
+                &object_points,
+                &image_points,
                 &camera_mat,
                 &dist_coeffs,
                 &mut rvec,
                 &mut tvec,
                 true,
                 SOLVEPNP_ITERATIVE,
-            )?;
+            )
+            .unwrap();
 
             (success, rvec, tvec)
         } else {
-            let mut rvec = Mat::zeros(3, 1, CV_32F)?.to_mat()?;
-            let mut tvec = Mat::zeros(3, 1, CV_32F)?.to_mat()?;
+            let mut rvec = opencv::core::Vector::from_slice(&[0.0, 0.0, 0.0]);
+            let mut tvec = opencv::core::Vector::from_slice(&[0.0, 0.0, 0.0]);
+            println!("Object Points: {}", object_points.len());
+            println!("Image Points: {}", image_points.len());
 
-            let success = solve_pnp(
-                &object_pts,
-                &image_pts,
-                &camera_mat,
-                &dist_coeffs,
-                &mut rvec,
-                &mut tvec,
-                true,
-                SOLVEPNP_ITERATIVE,
-            )?;
+            // TODO
+            (false, rvec, tvec)
+            // let success = solve_pnp(
+            //     &object_points,
+            //     &image_points,
+            //     &camera_mat,
+            //     &dist_coeffs,
+            //     &mut rvec,
+            //     &mut tvec,
+            //     true,
+            //     SOLVEPNP_ITERATIVE,
+            // )
+            // .unwrap();
 
-            (success, rvec, tvec)
+            // (success, rvec, tvec)
         };
 
         let mut pts_3d = Array2::zeros((70, 3));
@@ -735,7 +757,7 @@ impl Tracker {
         }
 
         // Convert rotation vector to matrix and get inverse
-        let mut rmat = Mat::default();
+        let mut rmat = opencv::core::Mat::default();
         rodrigues(&rotation, &mut rmat, &mut no_array())?;
         let rmat_array = mat_to_array2(&rmat)?;
         let inverse_rotation = rmat_array.inv()?;
@@ -854,7 +876,7 @@ impl Tracker {
         }
 
         // Calculate final PnP error
-        let pnp_error = (pnp_error / (2.0 * image_pts.len() as f32)).sqrt();
+        let pnp_error = (pnp_error / (2.0 * image_points.len() as f32)).sqrt();
 
         // Handle high error cases
         if pnp_error > 300.0 {

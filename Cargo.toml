@@ -13,3 +13,5 @@ ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
 anyhow = "1.0.93"
 glam = "0.29.2"
 memmap2 = "0.9.5"
+rusty-yunet = { version = "*", path = "../../rusty-yunet" }
+image = "0.23"

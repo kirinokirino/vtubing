@@ -199,7 +199,8 @@ impl FaceInfo {
 
     pub fn adjust_3d(&mut self) {
         // Early return conditions
-        if self.conf.unwrap_or(0.0) < 0.4 || self.pnp_error > 300.0 {
+        if self.conf.unwrap_or(0.0) < 0.4 {
+            //|| self.pnp_error > 300.0 {
             return;
         }
 
