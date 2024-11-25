@@ -57,11 +57,11 @@ pub fn main() {
         })
         .unwrap();
 
+    let mut memory = Vec::new();
     loop {
         canvas.pen_color = [0, 0, 0, 255];
         canvas.draw_square(Vec2::new(0.0, 0.0), Vec2::new(640.0, 480.0));
         let frame = camera.capture().unwrap();
-        println!("Captured frame size: {}", frame.len());
 
         let mut image = yuyv_to_bgr(
             &frame,
@@ -76,24 +76,52 @@ pub fn main() {
         )
         .unwrap();
 
-        for face in faces {
+        for face in faces.into_iter().by_ref() {
             let c = (face.confidence() * 255.0) as u8;
             canvas.pen_color = [c, c, c, 255];
+
             let FaceLandmarks {
                 right_eye,
                 left_eye,
                 nose,
                 mouth_right,
                 mouth_left,
-            } = face.landmarks();
-            println!("{:?}", nose);
-            canvas.draw_circle(*right_eye, 5.0);
-            canvas.draw_circle(*left_eye, 5.0);
-            canvas.draw_circle(*nose, 5.0);
-            canvas.draw_circle(*mouth_right, 5.0);
-            canvas.draw_circle(*mouth_left, 5.0);
+            } = smoothed(face.landmarks(), &mut memory);
+            let eyes_center = (right_eye + left_eye) / 2.0;
+            let offset = eyes_center - nose;
+            canvas.draw_line(right_eye + offset, nose + offset);
+            canvas.draw_line(left_eye + offset, nose + offset);
+            let size = Vec2::new(10.0, 10.0);
+            canvas.draw_square(left_eye - size / 2.0, left_eye + size / 2.0);
+            canvas.draw_square(right_eye - size / 2.0, right_eye + size / 2.0);
+            canvas.draw_curve(mouth_left, nose, mouth_right);
+            // canvas.draw_circle(*right_eye, 5.0);
+            // canvas.draw_circle(*left_eye, 5.0);
+            // canvas.draw_circle(*nose, 5.0);
+            // canvas.draw_circle(*mouth_right, 5.0);
+            // canvas.draw_circle(*mouth_left, 5.0);
         }
         canvas.display();
+    }
+}
+
+fn smoothed(next_landmarks: &FaceLandmarks, mut memory: &mut Vec<FaceLandmarks>) -> FaceLandmarks {
+    if memory.is_empty() {
+        memory.clear();
+        memory.push(next_landmarks.clone());
+        next_landmarks.clone()
+    } else {
+        let last_landmarks = &memory[0];
+        let res = FaceLandmarks {
+            right_eye: (last_landmarks.right_eye + next_landmarks.right_eye) / 2.0,
+            left_eye: (last_landmarks.left_eye + next_landmarks.left_eye) / 2.0,
+            nose: (last_landmarks.nose + next_landmarks.nose) / 2.0,
+            mouth_left: (last_landmarks.mouth_left + next_landmarks.mouth_left) / 2.0,
+            mouth_right: (last_landmarks.mouth_right + next_landmarks.mouth_right) / 2.0,
+        };
+        memory.clear();
+        memory.push(next_landmarks.clone());
+        res
     }
 }
 
