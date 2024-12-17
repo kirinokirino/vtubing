@@ -102,6 +102,7 @@ pub fn main() {
             // canvas.draw_circle(*mouth_left, 5.0);
         }
         canvas.display();
+        std::thread::sleep(std::time::Duration::from_millis(1000 / 60));
     }
 }
 
